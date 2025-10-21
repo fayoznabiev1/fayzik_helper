@@ -327,11 +327,10 @@ from aiohttp import web
 # Инициализация бота
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
 
 # Настройки webhook
-WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://fayozbot.onrender.com")  # ⚠️ Впиши свой Render-домен
-WEBHOOK_PATH = f"/webhook/{bot.token}"
+WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://fayzik-helper.onrender.com")
+WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 
 async def on_startup(app):
@@ -343,15 +342,14 @@ async def on_shutdown(app):
     print("[INFO] Удаляю webhook...")
     await bot.delete_webhook()
 
-# Создание aiohttp-приложения
 app = web.Application()
 SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
 setup_application(app, dp, on_startup=on_startup, on_shutdown=on_shutdown)
 
-if __name__ == "__main__":
-    # ===== Если есть keep_alive.py — включай здесь =====
-    # keep_alive()
+@dp.message(Command("start"))
+async def start_cmd(message: types.Message):
+    await message.answer("✅ Бот жив! Webhook работает.")
 
+if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     web.run_app(app, host="0.0.0.0", port=port)
-
