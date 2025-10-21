@@ -326,11 +326,40 @@ async def universal_message_handler(msg: types.Message):
             await msg.answer("❌ Не удалось скачать видео.")
         return
 
-# ==== Запуск ====
-async def main():
-    print("[INFO] Bot запущен!")
-    await dp.start_polling(bot)
+import os
+import asyncio
+from aiogram import Bot, Dispatcher
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
+from keep_alive import keep_alive  # если у тебя есть keep_alive()
+
+# Инициализация бота
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+# Настройки webhook
+WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://fayozbot.onrender.com")  # ⚠️ Замени на свою ссылку из Render
+WEBHOOK_PATH = f"/webhook/{bot.token}"
+WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+
+async def on_startup(app):
+    print("[INFO] Устанавливаю webhook...")
+    await bot.set_webhook(WEBHOOK_URL)
+    print(f"[INFO] Webhook установлен: {WEBHOOK_URL}")
+
+async def on_shutdown(app):
+    print("[INFO] Удаляю webhook...")
+    await bot.delete_webhook()
+
+# Создание приложения aiohttp
+app = web.Application()
+SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
+setup_application(app, dp, on_startup=on_startup, on_shutdown=on_shutdown)
+
+# Flask keep_alive, если он у тебя есть
+keep_alive()
 
 if __name__ == "__main__":
-    keep_alive()
-    asyncio.run(main())
+    port = int(os.getenv("PORT", 5000))
+    web.run_app(app, host="0.0.0.0", port=port)
