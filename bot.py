@@ -8,8 +8,6 @@ from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, F, Router, types
 from aiogram.filters import Command
 from aiogram.types import FSInputFile, BufferedInputFile
-from flask import Flask
-from threading import Thread
 from openai import OpenAI
 from datetime import datetime
 from dotenv import load_dotenv
@@ -81,15 +79,6 @@ def is_tiktok_url(text): return "tiktok.com" in text
 def is_instagram_url(text): return "instagram.com" in text or "instagram." in text
 def is_youtube_url(text): return "youtube.com" in text or "youtu.be" in text
 
-# ==== Flask для UptimeRobot ====
-app = Flask('')
-@app.route('/')
-def home():
-    return "✅ Бот работает!"
-def run():
-    app.run(host='127.0.0.1', port=5000)
-def keep_alive():
-    Thread(target=run).start()
 
 # ==== TikTok API ====
 async def get_tiktok_video(url):
@@ -331,7 +320,9 @@ import asyncio
 from aiogram import Bot, Dispatcher
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
-from keep_alive import keep_alive  # если у тебя есть keep_alive()
+
+# ===== Если есть keep_alive.py, раскомментируй эту строку =====
+# from keep_alive import keep_alive
 
 # Инициализация бота
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -339,7 +330,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # Настройки webhook
-WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://fayozbot.onrender.com")  # ⚠️ Замени на свою ссылку из Render
+WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://fayozbot.onrender.com")  # ⚠️ Впиши свой Render-домен
 WEBHOOK_PATH = f"/webhook/{bot.token}"
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 
@@ -352,14 +343,15 @@ async def on_shutdown(app):
     print("[INFO] Удаляю webhook...")
     await bot.delete_webhook()
 
-# Создание приложения aiohttp
+# Создание aiohttp-приложения
 app = web.Application()
 SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
 setup_application(app, dp, on_startup=on_startup, on_shutdown=on_shutdown)
 
-# Flask keep_alive, если он у тебя есть
-keep_alive()
-
 if __name__ == "__main__":
+    # ===== Если есть keep_alive.py — включай здесь =====
+    # keep_alive()
+
     port = int(os.getenv("PORT", 5000))
     web.run_app(app, host="0.0.0.0", port=port)
+
