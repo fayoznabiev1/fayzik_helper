@@ -1,0 +1,8 @@
+aiogram
+python-dotenv
+yt-dlp
+flask
+requests
+aiohttp
+openai
+beautifulsoup4
