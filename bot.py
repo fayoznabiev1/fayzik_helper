@@ -275,6 +275,29 @@ async def generate_cmd(msg: types.Message):
     except Exception as e:
         await msg.answer(f"❌ Ошибка генерации: {e}")
 
+@router.message(F.text.contains("instagram.com") | F.text.contains("reel"))
+async def handle_instagram(message: types.Message):
+    url = message.text.strip()
+    await message.answer("⏳ Загружаю Instagram...")
+    file_path = await get_instagram_video(url)
+    if file_path:
+        await message.answer_video(video=FSInputFile(file_path))
+        os.remove(file_path)
+    else:
+        await message.answer("❌ Не удалось скачать видео с Instagram. Попробуй другую ссылку.")
+
+
+@router.message(F.text.contains("youtube.com") | F.text.contains("youtu.be"))
+async def handle_youtube(message: types.Message):
+    url = message.text.strip()
+    await message.answer("⏳ Загружаю YouTube...")
+    file_path = get_youtube_video(url)
+    if file_path:
+        await message.answer_video(video=FSInputFile(file_path))
+        os.remove(file_path)
+    else:
+        await message.answer("❌ Не удалось скачать видео с YouTube.")
+
 # ==== Обработка ссылок (один обработчик для всех случаев) ====
 @dp.message(F.text)
 async def universal_message_handler(msg: types.Message):
