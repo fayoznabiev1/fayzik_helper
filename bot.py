@@ -317,20 +317,11 @@ async def universal_message_handler(msg: types.Message):
 
 import os
 import asyncio
-from aiogram import Bot, Dispatcher
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
-# ===== Если есть keep_alive.py, раскомментируй эту строку =====
-# from keep_alive import keep_alive
-
-# Инициализация бота
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-bot = Bot(token=BOT_TOKEN)
-
-# Настройки webhook
 WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://fayzik-helper.onrender.com")
-WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
+WEBHOOK_PATH = "/webhook"  # без токена!
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 
 async def on_startup(app):
@@ -346,10 +337,7 @@ app = web.Application()
 SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
 setup_application(app, dp, on_startup=on_startup, on_shutdown=on_shutdown)
 
-@dp.message(Command("start"))
-async def start_cmd(message: types.Message):
-    await message.answer("✅ Бот жив! Webhook работает.")
-
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 5000))
+    port = int(os.getenv("PORT", 10000))
     web.run_app(app, host="0.0.0.0", port=port)
+
