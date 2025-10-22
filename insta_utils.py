@@ -2,7 +2,7 @@ import os
 import aiohttp
 from yt_dlp import YoutubeDL
 
-# === Instagram через API ===
+# === Instagram через API (SnapInsta) ===
 async def get_instagram_video(url: str):
     try:
         api_url = f"https://api.snapinsta.app/api/v1/fetch?url={url}"
@@ -13,7 +13,6 @@ async def get_instagram_video(url: str):
                     return None
 
                 data = await resp.json()
-                # Проверяем, что в ответе есть видео
                 if "media" in data and len(data["media"]) > 0:
                     video_url = data["media"][0]["url"]
                     async with session.get(video_url) as video_resp:
