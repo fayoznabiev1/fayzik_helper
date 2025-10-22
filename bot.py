@@ -300,7 +300,8 @@ async def universal_message_handler(msg: types.Message):
     # YouTube
     if is_youtube_url(text):
         await msg.answer("⏳ Загружаю YouTube...")
-        file_path = get_youtube_video(text)
+        file_path = await get_youtube_video(text)
+
         if file_path:
             await msg.answer_video(video=FSInputFile(file_path))
             os.remove(file_path)
