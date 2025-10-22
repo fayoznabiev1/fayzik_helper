@@ -4,9 +4,8 @@ import aiohttp
 import asyncio
 import time
 from insta_utils import get_instagram_video, get_youtube_video
-from aiogram import F
 from bs4 import BeautifulSoup
-from aiogram import Bot, Dispatcher, F, Router, types
+from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.types import FSInputFile, BufferedInputFile
 from openai import OpenAI
@@ -31,8 +30,6 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-router = Router()
-dp.include_router(router)
 
 # ==== Утилиты для скачивания видео ====
 def download_video(url, filename):
@@ -200,9 +197,7 @@ async def pogoda_cmd(msg: types.Message):
     else:
         await msg.answer("❌ Не удалось получить погоду. Проверь API ключ.")
 
-@router.message(F.text.lower().contains("намаз"))
-async def namaz_handler(message: types.Message):
-    await send_namaz_time(message)
+
 
 # ==== Мотивация / цитаты ====
 async def get_motivation():
@@ -275,34 +270,11 @@ async def generate_cmd(msg: types.Message):
     except Exception as e:
         await msg.answer(f"❌ Ошибка генерации: {e}")
 
-@router.message(F.text.contains("instagram.com") | F.text.contains("reel"))
-async def handle_instagram(message: types.Message):
-    url = message.text.strip()
-    await message.answer("⏳ Загружаю Instagram...")
-    file_path = await get_instagram_video(url)
-    if file_path:
-        await message.answer_video(video=FSInputFile(file_path))
-        os.remove(file_path)
-    else:
-        await message.answer("❌ Не удалось скачать видео с Instagram. Попробуй другую ссылку.")
-
-
-@router.message(F.text.contains("youtube.com") | F.text.contains("youtu.be"))
-async def handle_youtube(message: types.Message):
-    url = message.text.strip()
-    await message.answer("⏳ Загружаю YouTube...")
-    file_path = get_youtube_video(url)
-    if file_path:
-        await message.answer_video(video=FSInputFile(file_path))
-        os.remove(file_path)
-    else:
-        await message.answer("❌ Не удалось скачать видео с YouTube.")
 
 # ==== Обработка ссылок (один обработчик для всех случаев) ====
 @dp.message(F.text)
 async def universal_message_handler(msg: types.Message):
     text = msg.text.strip()
-    
 
     # TikTok
     if is_tiktok_url(text):
@@ -314,29 +286,27 @@ async def universal_message_handler(msg: types.Message):
             await msg.answer("❌ Не удалось скачать видео.")
         return
 
-@router.message(F.text.contains("instagram.com") | F.text.contains("reel"))
-async def handle_instagram(message: types.Message):
-    url = message.text.strip()
-    await message.answer("⏳ Загружаю Instagram...")
-    file_path = await get_instagram_video(url)
-    if file_path:
-        await message.answer_video(video=FSInputFile(file_path))
-        os.remove(file_path)
-    else:
-        await message.answer("❌ Не удалось скачать видео с Instagram. Попробуй другую ссылку.")
+    # Instagram
+    if is_instagram_url(text):
+        await msg.answer("⏳ Загружаю Instagram...")
+        file_path = await get_instagram_video(text)
+        if file_path:
+            await msg.answer_video(video=FSInputFile(file_path))
+            os.remove(file_path)
+        else:
+            await msg.answer("❌ Не удалось скачать видео с Instagram.")
+        return
 
-
-@router.message(F.text.contains("youtube.com") | F.text.contains("youtu.be"))
-async def handle_youtube(message: types.Message):
-    url = message.text.strip()
-    await message.answer("⏳ Загружаю YouTube...")
-    file_path = get_youtube_video(url)
-    if file_path:
-        await message.answer_video(video=FSInputFile(file_path))
-        os.remove(file_path)
-    else:
-        await message.answer("❌ Не удалось скачать видео с YouTube.")
-
+    # YouTube
+    if is_youtube_url(text):
+        await msg.answer("⏳ Загружаю YouTube...")
+        file_path = get_youtube_video(text)
+        if file_path:
+            await msg.answer_video(video=FSInputFile(file_path))
+            os.remove(file_path)
+        else:
+            await msg.answer("❌ Не удалось скачать видео с YouTube.")
+        return
 
 import os
 import asyncio
@@ -344,7 +314,7 @@ from aiohttp import web
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://fayzik-helper.onrender.com")
-WEBHOOK_PATH = "/webhook"  # без токена!
+WEBHOOK_PATH = "/webhook"  # без токена
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 
 async def on_startup(app):
@@ -363,4 +333,3 @@ setup_application(app, dp, on_startup=on_startup, on_shutdown=on_shutdown)
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
     web.run_app(app, host="0.0.0.0", port=port)
-
