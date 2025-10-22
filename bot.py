@@ -4,6 +4,7 @@ import aiohttp
 import asyncio
 import time
 from insta_utils import get_instagram_video, get_youtube_video
+from aiogram import F
 from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, F, Router, types
 from aiogram.filters import Command
@@ -290,30 +291,29 @@ async def universal_message_handler(msg: types.Message):
             await msg.answer("❌ Не удалось скачать видео.")
         return
 
-    # Instagram (заглушка)
-    if is_instagram_url(text):
-        await msg.answer("⏳ Загружаю Instagram...")
-        loop = asyncio.get_event_loop()
-        file_path = await loop.run_in_executor(None, get_instagram_video, text)
-        if file_path:
-            await msg.answer_video(FSInputFile(file_path))
-            os.remove(file_path)
-        else:
-            await msg.answer("❌ Не удалось скачать видео.")
-        return
-    # YouTube (пример через yt-dlp)
-    if is_youtube_url(text):
-        await msg.answer("⏳ Загружаю YouTube...")
-        filename = f"video_{int(time.time())}.mp4"
-        loop = asyncio.get_event_loop()
-        file_path = await loop.run_in_executor(None, download_video, text, filename)
-        if file_path:
-            video = FSInputFile(file_path)
-            await msg.answer_video(video)
-            os.remove(file_path)
-        else:
-            await msg.answer("❌ Не удалось скачать видео.")
-        return
+@router.message(F.text.contains("instagram.com") | F.text.contains("reel"))
+async def handle_instagram(message: types.Message):
+    url = message.text.strip()
+    await message.answer("⏳ Загружаю Instagram...")
+    file_path = await get_instagram_video(url)
+    if file_path:
+        await message.answer_video(video=FSInputFile(file_path))
+        os.remove(file_path)
+    else:
+        await message.answer("❌ Не удалось скачать видео с Instagram. Попробуй другую ссылку.")
+
+
+@router.message(F.text.contains("youtube.com") | F.text.contains("youtu.be"))
+async def handle_youtube(message: types.Message):
+    url = message.text.strip()
+    await message.answer("⏳ Загружаю YouTube...")
+    file_path = get_youtube_video(url)
+    if file_path:
+        await message.answer_video(video=FSInputFile(file_path))
+        os.remove(file_path)
+    else:
+        await message.answer("❌ Не удалось скачать видео с YouTube.")
+
 
 import os
 import asyncio
