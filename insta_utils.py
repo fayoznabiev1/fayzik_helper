@@ -1,6 +1,5 @@
 import os
 import aiohttp
-from yt_dlp import YoutubeDL
 
 # === Instagram через API TikWM ===
 async def get_instagram_video(url: str):
@@ -31,30 +30,47 @@ async def get_instagram_video(url: str):
     return None
 
 
-# === YouTube через yt-dlp ===
-def get_youtube_video(url: str):
+# === YouTube через API (вместо yt-dlp) ===
+async def get_youtube_video(url: str):
     try:
-        file_path = "/tmp/yt_video.mp4"
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        api_url = "https://yt-api.vercel.app/api/info"
+        params = {"url": url}
 
-        ydl_opts = {
-            "outtmpl": file_path,
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
-            "merge_output_format": "mp4",
-            "format": "bestvideo+bestaudio/best",
-        }
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url, params=params) as resp:
+                if resp.status != 200:
+                    print(f"❌ YouTube API error: {resp.status}")
+                    return None
 
-        with YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+                data = await resp.json()
+                formats = data.get("formats", [])
+                video_url = None
 
-        if os.path.exists(file_path):
-            print("✅ YouTube video downloaded successfully")
-            return file_path
+                # ищем mp4 или лучшее качество
+                for f in formats:
+                    if f.get("mimeType", "").startswith("video/mp4"):
+                        video_url = f.get("url")
+                        break
+
+                if not video_url:
+                    print("❌ No suitable video format found")
+                    return None
+
+                # скачиваем видео
+                async with session.get(video_url) as video_resp:
+                    if video_resp.status == 200:
+                        content = await video_resp.read()
+                        file_path = "/tmp/yt_video.mp4"
+                        with open(file_path, "wb") as f:
+                            f.write(content)
+                        print("✅ YouTube video downloaded successfully")
+                        return file_path
+                    else:
+                        print(f"❌ Can't download YouTube video: {video_resp.status}")
 
     except Exception as e:
-        print(f"⚠️ YouTube download error: {e}")
+        print(f"⚠️ YouTube API error: {e}")
 
     return None
+
+
