@@ -6,3 +6,4 @@ requests
 aiohttp
 openai
 beautifulsoup4
+imageio-ffmpeg
