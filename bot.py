@@ -1,10 +1,12 @@
 import os
 import logging
 import aiohttp
+import uuid
 import asyncio
 import time
 from collections import defaultdict
-from insta_utils import get_instagram_video, get_youtube_video, cleanup_file
+from insta_utils import download_media, cleanup_file
+from typing import Dict
 from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -26,6 +28,57 @@ if not all([BOT_TOKEN, OPENAI_API_KEY, NEWS_API_KEY, OPENWEATHER_API_KEY]):
     raise ValueError("Одна или несколько переменных окружения не заданы!")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
+
+
+# 2) Глобальная очередь/хранилище задач (в начале файла, рядом с user_downloads)
+download_jobs: Dict[str, asyncio.Task] = {}  # job_id -> Task
+
+# 3) Функция фоновой задачи (делает загрузку и отправляет результат пользователю)
+async def _background_download_and_send(chat_id: int, url: str, job_id: str, max_size: int):
+    """
+    Загружает медиа и отправляет пользователю.
+    Эта функция запускается через asyncio.create_task — поэтому не блокирует webhook.
+    """
+    try:
+        # Уведомим пользователя, что задача в работе (можно редактировать предыдущее сообщение)
+        try:
+            await bot.send_message(chat_id, f"⏳ Обработка ссылки... (job {job_id})")
+        except Exception:
+            pass
+
+        result = await download_media(url, max_filesize=max_size)
+
+        if result.get("error"):
+            # если yt-dlp вернул специфическую ошибку — сообщим пользователю понятным образом
+            err = result["error"]
+            if "login required" in err.lower() or "sign in" in err.lower():
+                await bot.send_message(chat_id, "❌ Не удалось скачать: требуется авторизация (cookies) или сервис блокирует запросы.")
+            elif "file_too_large" in err:
+                await bot.send_message(chat_id, "⚠️ Файл получился слишком большим для отправки.")
+            else:
+                await bot.send_message(chat_id, f"❌ Ошибка при скачивании: {err}")
+            return
+
+        path = result.get("path")
+        if not path:
+            await bot.send_message(chat_id, "❌ Не удалось скачать файл. Попробуй публичную ссылку или используй cookies.")
+            return
+
+        # Отправляем файл — если большой, можно отправить как документ
+        try:
+            size = os.path.getsize(path)
+            # Если файл маленький, отправляем как видео, иначе как документ
+            if size <= int(os.getenv("TELEGRAM_VIDEO_THRESHOLD", 50 * 1024 * 1024)):
+                await bot.send_video(chat_id, video=FSInputFile(path))
+            else:
+                await bot.send_document(chat_id, document=FSInputFile(path), caption="Готово (как файл)")
+        except Exception as e:
+            await bot.send_message(chat_id, f"❌ Ошибка при отправке файла: {e}")
+        finally:
+            cleanup_file(path)
+    finally:
+        # удалим задачу из списка по завершению
+        download_jobs.pop(job_id, None)
 
 
 # Защиты и лимиты
@@ -305,68 +358,35 @@ async def generate_cmd(msg: types.Message):
         await msg.answer(f"❌ Ошибка генерации: {e}")
 
 
-# ==== Обработка ссылок (один обработчик для всех случаев) ====
 @dp.message(F.text)
 async def universal_message_handler(msg: types.Message):
     text = (msg.text or "").strip()
     user_id = msg.from_user.id if msg.from_user else None
 
     # whitelist если задан
-    if ALLOWED_USERS:
-        if user_id not in ALLOWED_USERS:
-            await msg.answer("⚠️ У тебя нет доступа к скачиванию через этого бота.")
-            return
+    if ALLOWED_USERS and user_id not in ALLOWED_USERS:
+        await msg.answer("⚠️ У тебя нет доступа к скачиванию через этого бота.")
+        return
 
     # rate limit
     if not can_download(user_id):
         await msg.answer("⛔ Лимит скачиваний превышен. Попробуй позже.")
         return
 
-    # TikTok (public)
-    if is_tiktok_url(text):
-        await msg.answer("⏳ Загружаю TikTok...")
-        try:
-            video_url = await get_tiktok_video(text)  # если используешь внешний api для tikwm
-            if video_url:
-                await msg.answer_video(video_url)
-            else:
-                await msg.answer("❌ Не удалось скачать видео.")
-        except Exception:
-            logging.exception("Ошибка при скачивании TikTok")
-            await msg.answer("❌ Ошибка при скачивании TikTok.")
-        return
+    # только ссылки
+    if not (is_instagram_url(text) or is_youtube_url(text) or is_tiktok_url(text)):
+        return  # остальная логика выше/ниже в файле обработает команды
 
-    # Instagram (public)
-    if is_instagram_url(text):
-        await msg.answer("⏳ Загружаю Instagram (публичный пост)...")
-        max_size = int(os.getenv("MAX_FILESIZE_BYTES", 50 * 1024 * 1024))
-        file_path = None
-        try:
-            file_path = await get_instagram_video(text, max_filesize=max_size)
-            if not file_path:
-                await msg.answer("❌ Не удалось скачать видео (возможно приватный пост или превышен лимит).")
-                return
+    # Ограничение размера из env
+    max_size = int(os.getenv("MAX_FILESIZE_BYTES", 50 * 1024 * 1024))
 
-            size = os.path.getsize(file_path)
-            if size > max_size:
-                await msg.answer("⚠️ Файл слишком большой для отправки.")
-                return
+    # Создаём job и ставим её в фон
+    job_id = str(uuid.uuid4())[:8]
+    task = asyncio.create_task(_background_download_and_send(msg.chat.id, text, job_id, max_size))
+    download_jobs[job_id] = task
 
-            await msg.answer_video(video=FSInputFile(file_path))
-        except Exception as e:
-            logging.exception("Ошибка при скачивании/отправке Instagram-видео")
-            await msg.answer(f"❌ Ошибка при обработке видео: {e}")
-        finally:
-            if file_path:
-                # попытка вызвать cleanup_file если он импортирован, иначе удалить напрямую
-                try:
-                    cleanup_file(file_path)
-                except NameError:
-                    try:
-                        os.remove(file_path)
-                    except Exception:
-                        pass
-        return
+    await msg.answer(f"✅ Ссылка принята в очередь. Номер задачи: {job_id}. Я пришлю файл, как только он будет готов.")
+    return
 
     # YouTube (public)
     if is_youtube_url(text):
