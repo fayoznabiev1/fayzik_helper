@@ -15,6 +15,10 @@ from openai import OpenAI
 from datetime import datetime
 from dotenv import load_dotenv
 
+# Импорты для webhook / aiohttp (перенесены вверх, чтобы не дублироваться внизу)
+from aiohttp import web
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+
 # Загрузить переменные окружения из .env файла
 load_dotenv()
 
@@ -30,6 +34,10 @@ if not all([BOT_TOKEN, OPENAI_API_KEY, NEWS_API_KEY, OPENWEATHER_API_KEY]):
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 
+# ==== Параметры параллелизма и очередь задач ====
+MAX_PARALLEL_DOWNLOADS = int(os.getenv("MAX_PARALLEL_DOWNLOADS", 2))
+download_semaphore = asyncio.Semaphore(MAX_PARALLEL_DOWNLOADS)
+
 # 2) Глобальная очередь/хранилище задач (в начале файла, рядом с user_downloads)
 download_jobs: Dict[str, asyncio.Task] = {}  # job_id -> Task
 
@@ -38,24 +46,37 @@ async def _background_download_and_send(chat_id: int, url: str, job_id: str, max
     """
     Загружает медиа и отправляет пользователю.
     Эта функция запускается через asyncio.create_task — поэтому не блокирует webhook.
+    Добавлен семафор для ограничения параллельных загрузок и логирование.
     """
     try:
         # Уведомим пользователя, что задача в работе (можно редактировать предыдущее сообщение)
         try:
             await bot.send_message(chat_id, f"⏳ Обработка ссылки... (job {job_id})")
         except Exception:
-            pass
+            logging.exception("Не удалось отправить 'обработка' сообщение пользователю")
 
-        result = await download_media(url, max_filesize=max_size)
+        # ограничиваем количество одновременно выполняемых загрузок
+        async with download_semaphore:
+            try:
+                result = await download_media(url, max_filesize=max_size)
+            except Exception:
+                logging.exception("Фатальная ошибка при вызове download_media")
+                try:
+                    await bot.send_message(chat_id, "❌ Внутренняя ошибка при попытке скачать файл.")
+                except Exception:
+                    pass
+                return
 
         if result.get("error"):
             # если yt-dlp вернул специфическую ошибку — сообщим пользователю понятным образом
-            err = result["error"]
-            if "login required" in err.lower() or "sign in" in err.lower():
+            err = result["error"] or ""
+            err_low = err.lower()
+            if "login required" in err_low or "sign in" in err_low:
                 await bot.send_message(chat_id, "❌ Не удалось скачать: требуется авторизация (cookies) или сервис блокирует запросы.")
             elif "file_too_large" in err:
                 await bot.send_message(chat_id, "⚠️ Файл получился слишком большим для отправки.")
             else:
+                # более детализированное сообщение без утечки секретов
                 await bot.send_message(chat_id, f"❌ Ошибка при скачивании: {err}")
             return
 
@@ -68,14 +89,22 @@ async def _background_download_and_send(chat_id: int, url: str, job_id: str, max
         try:
             size = os.path.getsize(path)
             # Если файл маленький, отправляем как видео, иначе как документ
-            if size <= int(os.getenv("TELEGRAM_VIDEO_THRESHOLD", 50 * 1024 * 1024)):
+            threshold = int(os.getenv("TELEGRAM_VIDEO_THRESHOLD", 50 * 1024 * 1024))
+            if size <= threshold:
                 await bot.send_video(chat_id, video=FSInputFile(path))
             else:
                 await bot.send_document(chat_id, document=FSInputFile(path), caption="Готово (как файл)")
-        except Exception as e:
-            await bot.send_message(chat_id, f"❌ Ошибка при отправке файла: {e}")
+        except Exception:
+            logging.exception("Ошибка при отправке файла пользователю")
+            try:
+                await bot.send_message(chat_id, "❌ Ошибка при отправке файла. Возможно, слишком большой файл или проблемы с сетью.")
+            except Exception:
+                pass
         finally:
-            cleanup_file(path)
+            try:
+                cleanup_file(path)
+            except Exception:
+                logging.exception("Не удалось удалить временный файл")
     finally:
         # удалим задачу из списка по завершению
         download_jobs.pop(job_id, None)
@@ -121,7 +150,7 @@ def download_video(url, filename):
         if os.path.exists(filename):
             return filename
     except Exception as e:
-        print(f"❌ yt-dlp error: {e}")
+        logging.exception(f"yt-dlp error: {e}")
     return None
 
 user_chats = {}  # для истории диалогов
@@ -174,7 +203,7 @@ async def get_tiktok_video(url):
                 data = await resp.json()
                 return data.get("data", {}).get("play")
     except Exception as e:
-        print("❌ TikTok error:", e)
+        logging.exception("TikTok error")
     return None
 
 # ==== Генерация изображений через OpenAI ====
@@ -194,7 +223,7 @@ async def generate_image(prompt: str) -> bytes:
 
 # ==== Намаз ====
 async def send_namaz_time(message: types.Message):
-    print("Получен запрос на время намаза")
+    logging.info("Получен запрос на время намаза")
     try:
         latitude = 41.2995  # Ташкент
         longitude = 69.2401
@@ -202,9 +231,9 @@ async def send_namaz_time(message: types.Message):
             async with session.get(
                 f"https://api.aladhan.com/v1/timings?latitude={latitude}&longitude={longitude}&method=2"
             ) as response:
-                print(f"API ответил: {response.status}")
+                logging.info(f"API ответил: {response.status}")
                 data = await response.json()
-                print(f"Данные: {data}")
+                logging.debug(f"Данные: {data}")
 
         timings = data["data"]["timings"]
         fajr = timings["Fajr"]
@@ -222,8 +251,8 @@ async def send_namaz_time(message: types.Message):
             f"🌃 Иша: {isha}"
         )
 
-    except Exception as e:
-        print("Ошибка при получении времени намаза:", e)
+    except Exception:
+        logging.exception("Ошибка при получении времени намаза")
         await message.answer("❌ Не удалось получить время намаза.")
 
 async def get_news():
@@ -271,8 +300,8 @@ async def get_weather_tashkent():
                        f"Описание: {description}\n" \
                        f"💧 Влажность: {humidity}%\n" \
                        f"💨 Ветер: {wind} м/с"
-    except Exception as e:
-        print("Ошибка при получении погоды:", e)
+    except Exception:
+        logging.exception("Ошибка при получении погоды")
         return None
 
 @dp.message(Command("pogoda"))
@@ -298,7 +327,8 @@ async def get_motivation():
                 quote = data[0]["q"]
                 author = data[0]["a"]
                 return f"💡 {quote}\n\n👤 {author}"
-    except:
+    except Exception:
+        logging.exception("Ошибка при получении цитаты")
         return "⚠️ Ошибка при получении цитаты."
 
 @dp.message(Command("motivation"))
@@ -355,6 +385,7 @@ async def generate_cmd(msg: types.Message):
         image = BufferedInputFile(image_data, filename="image.png")
         await msg.answer_photo(image, caption=f"🖌️ По запросу: {prompt}")
     except Exception as e:
+        logging.exception("Ошибка генерации изображения")
         await msg.answer(f"❌ Ошибка генерации: {e}")
 
 
@@ -388,45 +419,11 @@ async def universal_message_handler(msg: types.Message):
     await msg.answer(f"✅ Ссылка принята в очередь. Номер задачи: {job_id}. Я пришлю файл, как только он будет готов.")
     return
 
-    # YouTube (public)
-    if is_youtube_url(text):
-        await msg.answer("⏳ Загружаю YouTube...")
-        max_size = int(os.getenv("MAX_FILESIZE_BYTES", 50 * 1024 * 1024))
-        file_path = None
-        try:
-            file_path = await get_youtube_video(text, max_filesize=max_size)
-            if not file_path:
-                await msg.answer("❌ Не удалось скачать видео с YouTube (возможно приватный/доступ ограничен или файл слишком большой).")
-                return
-
-            size = os.path.getsize(file_path)
-            if size > max_size:
-                await msg.answer("⚠️ Файл слишком большой для отправки.")
-                return
-
-            await msg.answer_video(video=FSInputFile(file_path))
-        except Exception as e:
-            logging.exception("Ошибка при скачивании/отправке YouTube-видео")
-            await msg.answer(f"❌ Ошибка при обработке видео: {e}")
-        finally:
-            if file_path:
-                try:
-                    cleanup_file(file_path)
-                except NameError:
-                    try:
-                        os.remove(file_path)
-                    except Exception:
-                        pass
-        return
 
     # остальная логика (AI, команды и т.д.) остаётся как есть
 
 
 # ==== Webhook / запуск aiohttp приложения ====
-# Убедитесь, что эти импорты НЕ дублируются в других частях файла.
-from aiohttp import web
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-
 WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://fayzik-helper.onrender.com")
 WEBHOOK_PATH = "/webhook"  # без токена
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
