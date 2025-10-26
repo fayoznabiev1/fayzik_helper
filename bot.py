@@ -325,67 +325,85 @@ async def universal_message_handler(msg: types.Message):
     # TikTok (public)
     if is_tiktok_url(text):
         await msg.answer("⏳ Загружаю TikTok...")
-        video_url = await get_tiktok_video(text)  # если используешь внешний api для tikwm
-        if video_url:
-            await msg.answer_video(video_url)
-        else:
-            await msg.answer("❌ Не удалось скачать видео.")
+        try:
+            video_url = await get_tiktok_video(text)  # если используешь внешний api для tikwm
+            if video_url:
+                await msg.answer_video(video_url)
+            else:
+                await msg.answer("❌ Не удалось скачать видео.")
+        except Exception:
+            logging.exception("Ошибка при скачивании TikTok")
+            await msg.answer("❌ Ошибка при скачивании TikTok.")
         return
 
-# Замените соответствующий блок в universal_message_handler для Instagram на этот:
-if is_instagram_url(text):
-    await msg.answer("⏳ Загружаю Instagram (публичный пост)...")
-    max_size = int(os.getenv("MAX_FILESIZE_BYTES", 50 * 1024 * 1024))
-    file_path = None
-    try:
-        file_path = await get_instagram_video(text, max_filesize=max_size)
-        if not file_path:
-            await msg.answer("❌ Не удалось скачать видео (возможно приватный пост или превышен лимит).")
-            return
+    # Instagram (public)
+    if is_instagram_url(text):
+        await msg.answer("⏳ Загружаю Instagram (публичный пост)...")
+        max_size = int(os.getenv("MAX_FILESIZE_BYTES", 50 * 1024 * 1024))
+        file_path = None
+        try:
+            file_path = await get_instagram_video(text, max_filesize=max_size)
+            if not file_path:
+                await msg.answer("❌ Не удалось скачать видео (возможно приватный пост или превышен лимит).")
+                return
 
-        size = os.path.getsize(file_path)
-        if size > max_size:
-            await msg.answer("⚠️ Файл слишком большой для отправки.")
-            return
+            size = os.path.getsize(file_path)
+            if size > max_size:
+                await msg.answer("⚠️ Файл слишком большой для отправки.")
+                return
 
-        await msg.answer_video(video=FSInputFile(file_path))
-    except Exception as e:
-        logging.exception("Ошибка при скачивании/отправке Instagram-видео")
-        await msg.answer(f"❌ Ошибка при обработке видео: {e}")
-    finally:
-        if file_path:
-            cleanup_file(file_path)
-    return
+            await msg.answer_video(video=FSInputFile(file_path))
+        except Exception as e:
+            logging.exception("Ошибка при скачивании/отправке Instagram-видео")
+            await msg.answer(f"❌ Ошибка при обработке видео: {e}")
+        finally:
+            if file_path:
+                # попытка вызвать cleanup_file если он импортирован, иначе удалить напрямую
+                try:
+                    cleanup_file(file_path)
+                except NameError:
+                    try:
+                        os.remove(file_path)
+                    except Exception:
+                        pass
+        return
 
-# Аналогично для YouTube:
-if is_youtube_url(text):
-    await msg.answer("⏳ Загружаю YouTube...")
-    max_size = int(os.getenv("MAX_FILESIZE_BYTES", 50 * 1024 * 1024))
-    file_path = None
-    try:
-        file_path = await get_youtube_video(text, max_filesize=max_size)
-        if not file_path:
-            await msg.answer("❌ Не удалось скачать видео с YouTube (возможно приватный/доступ ограничен или файл слишком большой).")
-            return
+    # YouTube (public)
+    if is_youtube_url(text):
+        await msg.answer("⏳ Загружаю YouTube...")
+        max_size = int(os.getenv("MAX_FILESIZE_BYTES", 50 * 1024 * 1024))
+        file_path = None
+        try:
+            file_path = await get_youtube_video(text, max_filesize=max_size)
+            if not file_path:
+                await msg.answer("❌ Не удалось скачать видео с YouTube (возможно приватный/доступ ограничен или файл слишком большой).")
+                return
 
-        size = os.path.getsize(file_path)
-        if size > max_size:
-            await msg.answer("⚠️ Файл слишком большой для отправки.")
-            return
+            size = os.path.getsize(file_path)
+            if size > max_size:
+                await msg.answer("⚠️ Файл слишком большой для отправки.")
+                return
 
-        await msg.answer_video(video=FSInputFile(file_path))
-    except Exception as e:
-        logging.exception("Ошибка при скачивании/отправке YouTube-видео")
-        await msg.answer(f"❌ Ошибка при обработке видео: {e}")
-    finally:
-        if file_path:
-            cleanup_file(file_path)
-    return
+            await msg.answer_video(video=FSInputFile(file_path))
+        except Exception as e:
+            logging.exception("Ошибка при скачивании/отправке YouTube-видео")
+            await msg.answer(f"❌ Ошибка при обработке видео: {e}")
+        finally:
+            if file_path:
+                try:
+                    cleanup_file(file_path)
+                except NameError:
+                    try:
+                        os.remove(file_path)
+                    except Exception:
+                        pass
+        return
 
     # остальная логика (AI, команды и т.д.) остаётся как есть
 
-import os
-import asyncio
+
+# ==== Webhook / запуск aiohttp приложения ====
+# Убедитесь, что эти импорты не дублируются внизу файла — если дубли есть, удалите их там.
 from aiohttp import web
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
@@ -394,12 +412,12 @@ WEBHOOK_PATH = "/webhook"  # без токена
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 
 async def on_startup(app):
-    print("[INFO] Устанавливаю webhook...")
+    logging.info("[INFO] Устанавливаю webhook...")
     await bot.set_webhook(WEBHOOK_URL)
-    print(f"[INFO] Webhook установлен: {WEBHOOK_URL}")
+    logging.info(f"[INFO] Webhook установлен: {WEBHOOK_URL}")
 
 async def on_shutdown(app):
-    print("[INFO] Удаляю webhook...")
+    logging.info("[INFO] Удаляю webhook...")
     await bot.delete_webhook()
 
 app = web.Application()
@@ -408,4 +426,4 @@ setup_application(app, dp, on_startup=on_startup, on_shutdown=on_shutdown)
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
-    web.run_app(app, host="0.0.0.0", port=port)
+    web.run_app(app, host="0.0.0.0", port=port)d
