@@ -4,7 +4,7 @@ import aiohttp
 import asyncio
 import time
 from collections import defaultdict
-from insta_utils import get_instagram_video, get_youtube_video
+from insta_utils import get_instagram_video, get_youtube_video, cleanup_file
 from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -92,6 +92,10 @@ async def ask_ai(user_id: int, query: str):
 
 def can_download(user_id: int) -> bool:
     """Returns True if user can download now; also records the attempt."""
+    if not user_id:
+        # не даём анонимным/сервисным апдейтам скачивать
+        return False
+
     now = time.time()
     times = user_downloads[user_id]
     # keep only recent timestamps
@@ -328,51 +332,55 @@ async def universal_message_handler(msg: types.Message):
             await msg.answer("❌ Не удалось скачать видео.")
         return
 
-    # Instagram (public)
-    if is_instagram_url(text):
-        await msg.answer("⏳ Загружаю Instagram (публичный пост)...")
-        # ограничение размера: берем из env или по умолчанию
-        max_size = int(os.getenv("MAX_FILESIZE_BYTES", 50 * 1024 * 1024))
+# Замените соответствующий блок в universal_message_handler для Instagram на этот:
+if is_instagram_url(text):
+    await msg.answer("⏳ Загружаю Instagram (публичный пост)...")
+    max_size = int(os.getenv("MAX_FILESIZE_BYTES", 50 * 1024 * 1024))
+    file_path = None
+    try:
         file_path = await get_instagram_video(text, max_filesize=max_size)
-        if file_path:
-            try:
-                # дополнительная защита: если файл слишком большой — не отправляем
-                size = os.path.getsize(file_path)
-                if size > max_size:
-                    await msg.answer("⚠️ Файл слишком большой для отправки.")
-                    cleanup_file(file_path)
-                    return
-
-                await msg.answer_video(video=FSInputFile(file_path))
-            except Exception as e:
-                await msg.answer(f"❌ Ошибка при отправке видео: {e}")
-            finally:
-                cleanup_file(file_path)
-        else:
+        if not file_path:
             await msg.answer("❌ Не удалось скачать видео (возможно приватный пост или превышен лимит).")
-        return
+            return
 
-    # YouTube (public)
-    if is_youtube_url(text):
-        await msg.answer("⏳ Загружаю YouTube...")
-        max_size = int(os.getenv("MAX_FILESIZE_BYTES", 50 * 1024 * 1024))
-        file_path = await get_youtube_video(text, max_filesize=max_size)
+        size = os.path.getsize(file_path)
+        if size > max_size:
+            await msg.answer("⚠️ Файл слишком большой для отправки.")
+            return
+
+        await msg.answer_video(video=FSInputFile(file_path))
+    except Exception as e:
+        logging.exception("Ошибка при скачивании/отправке Instagram-видео")
+        await msg.answer(f"❌ Ошибка при обработке видео: {e}")
+    finally:
         if file_path:
-            try:
-                size = os.path.getsize(file_path)
-                if size > max_size:
-                    await msg.answer("⚠️ Файл слишком большой для отправки.")
-                    cleanup_file(file_path)
-                    return
+            cleanup_file(file_path)
+    return
 
-                await msg.answer_video(video=FSInputFile(file_path))
-            except Exception as e:
-                await msg.answer(f"❌ Ошибка при отправке видео: {e}")
-            finally:
-                cleanup_file(file_path)
-        else:
+# Аналогично для YouTube:
+if is_youtube_url(text):
+    await msg.answer("⏳ Загружаю YouTube...")
+    max_size = int(os.getenv("MAX_FILESIZE_BYTES", 50 * 1024 * 1024))
+    file_path = None
+    try:
+        file_path = await get_youtube_video(text, max_filesize=max_size)
+        if not file_path:
             await msg.answer("❌ Не удалось скачать видео с YouTube (возможно приватный/доступ ограничен или файл слишком большой).")
-        return
+            return
+
+        size = os.path.getsize(file_path)
+        if size > max_size:
+            await msg.answer("⚠️ Файл слишком большой для отправки.")
+            return
+
+        await msg.answer_video(video=FSInputFile(file_path))
+    except Exception as e:
+        logging.exception("Ошибка при скачивании/отправке YouTube-видео")
+        await msg.answer(f"❌ Ошибка при обработке видео: {e}")
+    finally:
+        if file_path:
+            cleanup_file(file_path)
+    return
 
     # остальная логика (AI, команды и т.д.) остаётся как есть
 
