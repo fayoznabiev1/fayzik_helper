@@ -403,7 +403,7 @@ async def universal_message_handler(msg: types.Message):
 
 
 # ==== Webhook / запуск aiohttp приложения ====
-# Убедитесь, что эти импорты не дублируются внизу файла — если дубли есть, удалите их там.
+# Убедитесь, что эти импорты НЕ дублируются в других частях файла.
 from aiohttp import web
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
@@ -426,4 +426,4 @@ setup_application(app, dp, on_startup=on_startup, on_shutdown=on_shutdown)
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
-    web.run_app(app, host="0.0.0.0", port=port)d
+    web.run_app(app, host="0.0.0.0", port=port)
