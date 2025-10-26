@@ -2,56 +2,32 @@ import os
 import asyncio
 import tempfile
 import time
-import shutil
-from typing import Optional
 from yt_dlp import YoutubeDL
+import imageio_ffmpeg as ffmpeg
 
-# Чтение конфигурации из переменных окружения
-# COOKIES_FILE - путь на файловой системе к cookies.txt (если вы загрузили файл)
-# COOKIES_TXT  - сам текст cookies.txt (многострочный) — удобно хранить как секрет в Render
-# COOKIES_FROM_BROWSER - имя браузера для cookiesfrombrowser (например "chrome"), но на Render обычно не работает
-# YTDLP_PROXY - строка прокси (например "http://user:pass@host:port") (опционально)
-COOKIES_FILE = os.getenv("COOKIES_FILE")
-COOKIES_TXT = os.getenv("COOKIES_TXT")
-COOKIES_FROM_BROWSER = os.getenv("COOKIES_FROM_BROWSER")
-YTDLP_PROXY = os.getenv("YTDLP_PROXY")
+"""
+insta_utils.py
+- Скачивает публичные видео (Instagram/YouTube/TikTok) через yt-dlp.
+- Работает в executor чтобы не блокировать asyncio loop.
+- Пишет временный файл в tempfile.gettempdir() и возвращает путь.
+- Ограничивает максимальный размер загрузки (по умолчанию 50 MB).
+"""
+
+DEFAULT_MAX_FILESIZE_BYTES = int(os.getenv("MAX_FILESIZE_BYTES", 50 * 1024 * 1024))  # 50 MB by default
 
 def _temp_filename(prefix="video", ext="mp4"):
     ts = int(time.time() * 1000)
     return os.path.join(tempfile.gettempdir(), f"{prefix}_{ts}.{ext}")
 
-def _prepare_cookiefile() -> Optional[str]:
-    """
-    Возвращает путь к cookies файлу, если он доступен.
-    Приоритет:
-    1) COOKIES_FILE (существующий путь)
-    2) COOKIES_TXT (записываем в файл в /tmp и возвращаем путь)
-    3) None
-    """
-    # 1) если задан путь и файл существует
-    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
-        return COOKIES_FILE
-
-    # 2) если задан текст cookies, создаём временный файл
-    if COOKIES_TXT:
-        path = os.path.join(tempfile.gettempdir(), f"cookies_{int(time.time()*1000)}.txt")
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(COOKIES_TXT)
-            return path
-        except Exception as e:
-            print(f"⚠️ Не удалось записать COOKIES_TXT в файл: {e}")
-            return None
-
-    # 3) нет cookies
-    return None
-
-async def _download_with_yt_dlp(url: str, out_path: str, ydl_opts_extra: dict = None) -> Optional[str]:
+async def _download_with_yt_dlp(url: str, out_path: str, max_filesize: int = None, ydl_opts_extra: dict = None) -> str | None:
     loop = asyncio.get_running_loop()
+    max_filesize = max_filesize or DEFAULT_MAX_FILESIZE_BYTES
 
-    # Подготовим cookiefile (может быть None)
-    cookiefile = _prepare_cookiefile()
-    is_temp_cookiefile = bool(os.getenv("COOKIES_TXT")) and cookiefile and (not COOKIES_FILE)
+    # Get packaged ffmpeg binary path (if available). yt-dlp will use it if merging required.
+    try:
+        ffmpeg_path = ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        ffmpeg_path = None
 
     def _run():
         ydl_opts = {
@@ -61,27 +37,24 @@ async def _download_with_yt_dlp(url: str, out_path: str, ydl_opts_extra: dict = 
             "quiet": True,
             "no_warnings": True,
             "ignoreerrors": True,
-            # Уменьшаем проблемы с заголовками/сертификатами
+            "noplaylist": True,
+            # reduce chunking issues
             "http_chunk_size": 0,
         }
 
-        # прокси, если указан
-        if YTDLP_PROXY:
-            ydl_opts["proxy"] = YTDLP_PROXY
+        if ffmpeg_path:
+            ydl_opts["ffmpeg_location"] = ffmpeg_path
 
-        # cookies
-        if cookiefile:
-            ydl_opts["cookiefile"] = cookiefile
-        elif COOKIES_FROM_BROWSER:
-            # попытаемся использовать cookiesfrombrowser (на сервере обычно не работает, но допустим)
-            ydl_opts["cookiesfrombrowser"] = COOKIES_FROM_BROWSER
+        # set max filesize if supported
+        if max_filesize:
+            # yt-dlp accepts int bytes for "max_filesize"
+            ydl_opts["max_filesize"] = max_filesize
 
-        # дополнительные опции
         if ydl_opts_extra:
             ydl_opts.update(ydl_opts_extra)
 
-        # Убедимся, что директория для файла существует
         try:
+            # ensure dir exists
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
         except Exception:
             pass
@@ -90,39 +63,36 @@ async def _download_with_yt_dlp(url: str, out_path: str, ydl_opts_extra: dict = 
             with YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
         except Exception as e:
+            # yt-dlp writes lots of info itself; we keep a concise message
             print(f"❌ yt-dlp error for {url}: {e}")
 
     try:
         await loop.run_in_executor(None, _run)
         if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            # final size check
+            size = os.path.getsize(out_path)
+            if max_filesize and size > max_filesize:
+                print(f"⚠️ Downloaded file bigger than max_filesize: {size} > {max_filesize}")
+                try:
+                    os.remove(out_path)
+                except Exception:
+                    pass
+                return None
             return out_path
     except Exception as e:
         print(f"Executor error: {e}")
-    finally:
-        # удалим временный cookie файл, если он был создан из COOKIES_TXT
-        if is_temp_cookiefile and cookiefile:
-            try:
-                os.remove(cookiefile)
-            except Exception:
-                pass
-
     return None
 
-async def get_instagram_video(url: str) -> Optional[str]:
-    """
-    Скачивает видео с Instagram (также может работать для некоторых TikTok/прочих).
-    Возвращает путь к файлу или None.
-    """
+# Public Instagram and TikTok (public) downloader
+async def get_instagram_video(url: str, max_filesize: int | None = None) -> str | None:
     out = _temp_filename("insta", "mp4")
-    # можно добавить дополнительные опции, например ограничение размера
-    return await _download_with_yt_dlp(url, out)
+    return await _download_with_yt_dlp(url, out, max_filesize=max_filesize)
 
-async def get_youtube_video(url: str) -> Optional[str]:
-    """
-    Скачивает YouTube видео и возвращает путь к mp4 файлу.
-    """
+# YouTube downloader
+async def get_youtube_video(url: str, max_filesize: int | None = None) -> str | None:
     out = _temp_filename("yt", "mp4")
-    return await _download_with_yt_dlp(url, out)
+    # for youtube you might want to limit resolution or duration via ydl_opts_extra
+    return await _download_with_yt_dlp(url, out, max_filesize=max_filesize)
 
 def cleanup_file(path: str):
     try:
