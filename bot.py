@@ -3,6 +3,7 @@ import logging
 import aiohttp
 import asyncio
 import time
+from collections import defaultdict
 from insta_utils import get_instagram_video, get_youtube_video
 from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, F, types
@@ -25,6 +26,23 @@ if not all([BOT_TOKEN, OPENAI_API_KEY, NEWS_API_KEY, OPENWEATHER_API_KEY]):
     raise ValueError("Одна или несколько переменных окружения не заданы!")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
+
+
+# Защиты и лимиты
+# Опция: ALLOWED_USERS — заполни через env var как "12345,67890" или оставь пустой (тогда whitelist отключён)
+ALLOWED_USERS = set()
+if os.getenv("ALLOWED_USERS"):
+    try:
+        ALLOWED_USERS = set(int(x.strip()) for x in os.getenv("ALLOWED_USERS").split(",") if x.strip())
+    except Exception:
+        ALLOWED_USERS = set()
+
+# rate limit: limit_count downloads per period_seconds per user
+RATE_LIMIT_COUNT = int(os.getenv("RATE_LIMIT_COUNT", 3))
+RATE_LIMIT_PERIOD = int(os.getenv("RATE_LIMIT_PERIOD", 600))  # seconds (10 minutes default)
+
+user_downloads = defaultdict(list)  # user_id -> list of timestamps
+
 
 # ==== Логирование ====
 logging.basicConfig(level=logging.INFO)
@@ -71,6 +89,18 @@ async def ask_ai(user_id: int, query: str):
     answer = response.choices[0].message.content
     user_chats[user_id].append({"role": "assistant", "content": answer})
     return answer
+
+def can_download(user_id: int) -> bool:
+    """Returns True if user can download now; also records the attempt."""
+    now = time.time()
+    times = user_downloads[user_id]
+    # keep only recent timestamps
+    window = [t for t in times if now - t < RATE_LIMIT_PERIOD]
+    user_downloads[user_id] = window
+    if len(window) >= RATE_LIMIT_COUNT:
+        return False
+    user_downloads[user_id].append(now)
+    return True
 
 # ==== Проверка ссылок ====
 def is_tiktok_url(text): return "tiktok.com" in text
@@ -274,40 +304,77 @@ async def generate_cmd(msg: types.Message):
 # ==== Обработка ссылок (один обработчик для всех случаев) ====
 @dp.message(F.text)
 async def universal_message_handler(msg: types.Message):
-    text = msg.text.strip()
+    text = (msg.text or "").strip()
+    user_id = msg.from_user.id if msg.from_user else None
 
-    # TikTok
+    # whitelist если задан
+    if ALLOWED_USERS:
+        if user_id not in ALLOWED_USERS:
+            await msg.answer("⚠️ У тебя нет доступа к скачиванию через этого бота.")
+            return
+
+    # rate limit
+    if not can_download(user_id):
+        await msg.answer("⛔ Лимит скачиваний превышен. Попробуй позже.")
+        return
+
+    # TikTok (public)
     if is_tiktok_url(text):
         await msg.answer("⏳ Загружаю TikTok...")
-        video_url = await get_tiktok_video(text)
+        video_url = await get_tiktok_video(text)  # если используешь внешний api для tikwm
         if video_url:
             await msg.answer_video(video_url)
         else:
             await msg.answer("❌ Не удалось скачать видео.")
         return
 
-    # Instagram
+    # Instagram (public)
     if is_instagram_url(text):
-        await msg.answer("⏳ Загружаю Instagram...")
-        file_path = await get_instagram_video(text)
+        await msg.answer("⏳ Загружаю Instagram (публичный пост)...")
+        # ограничение размера: берем из env или по умолчанию
+        max_size = int(os.getenv("MAX_FILESIZE_BYTES", 50 * 1024 * 1024))
+        file_path = await get_instagram_video(text, max_filesize=max_size)
         if file_path:
-            await msg.answer_video(video=FSInputFile(file_path))
-            os.remove(file_path)
+            try:
+                # дополнительная защита: если файл слишком большой — не отправляем
+                size = os.path.getsize(file_path)
+                if size > max_size:
+                    await msg.answer("⚠️ Файл слишком большой для отправки.")
+                    cleanup_file(file_path)
+                    return
+
+                await msg.answer_video(video=FSInputFile(file_path))
+            except Exception as e:
+                await msg.answer(f"❌ Ошибка при отправке видео: {e}")
+            finally:
+                cleanup_file(file_path)
         else:
-            await msg.answer("❌ Не удалось скачать видео с Instagram.")
+            await msg.answer("❌ Не удалось скачать видео (возможно приватный пост или превышен лимит).")
         return
 
-    # YouTube
+    # YouTube (public)
     if is_youtube_url(text):
         await msg.answer("⏳ Загружаю YouTube...")
-        file_path = await get_youtube_video(text)
-
+        max_size = int(os.getenv("MAX_FILESIZE_BYTES", 50 * 1024 * 1024))
+        file_path = await get_youtube_video(text, max_filesize=max_size)
         if file_path:
-            await msg.answer_video(video=FSInputFile(file_path))
-            os.remove(file_path)
+            try:
+                size = os.path.getsize(file_path)
+                if size > max_size:
+                    await msg.answer("⚠️ Файл слишком большой для отправки.")
+                    cleanup_file(file_path)
+                    return
+
+                await msg.answer_video(video=FSInputFile(file_path))
+            except Exception as e:
+                await msg.answer(f"❌ Ошибка при отправке видео: {e}")
+            finally:
+                cleanup_file(file_path)
         else:
-            await msg.answer("❌ Не удалось скачать видео с YouTube.")
+            await msg.answer("❌ Не удалось скачать видео с YouTube (возможно приватный/доступ ограничен или файл слишком большой).")
         return
+
+    # остальная логика (AI, команды и т.д.) остаётся как есть
 
 import os
 import asyncio
